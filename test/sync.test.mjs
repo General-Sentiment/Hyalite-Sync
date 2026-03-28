@@ -16,6 +16,7 @@ import {
   findCandidates,
   buildSlugMap,
   normalizeWikiLinks,
+  resolveFrontmatterWikiLinks,
   syncMedia,
   syncFile,
   sync,
@@ -76,6 +77,121 @@ describe("normalizeWikiLinks", () => {
   it("handles multiple wiki-links in one line", () => {
     const result = normalizeWikiLinks("[[Some Note]] and [[Another Page]]", slugMap);
     assert.equal(result, "[Some Note](/some-note) and [Another Page](/another-page)");
+  });
+});
+
+// ── resolveFrontmatterWikiLinks ─────────────────────────────
+
+describe("resolveFrontmatterWikiLinks", () => {
+  let vaultDir, mediaDir;
+
+  beforeEach(() => {
+    vaultDir = mkdtempSync(join(tmpdir(), "vault-"));
+    mediaDir = mkdtempSync(join(tmpdir(), "media-"));
+  });
+
+  afterEach(() => {
+    rmSync(vaultDir, { recursive: true });
+    rmSync(mediaDir, { recursive: true });
+  });
+
+  it("resolves a media wiki-link to /media/ path and copies the file", () => {
+    const imgPath = join(vaultDir, "cover.png");
+    writeFileSync(imgPath, "fake-image-data");
+    const filePath = join(vaultDir, "note.md");
+
+    const result = resolveFrontmatterWikiLinks(
+      { image: "[[cover.png]]" },
+      new Map(),
+      filePath,
+      vaultDir,
+      mediaDir
+    );
+
+    assert.equal(result.image, "/media/cover.png");
+    assert.ok(existsSync(join(mediaDir, "cover.png")));
+  });
+
+  it("resolves a non-media wiki-link using the slug map", () => {
+    const filePath = join(vaultDir, "note.md");
+    const slugMap = new Map([["other note", "other-note"]]);
+
+    const result = resolveFrontmatterWikiLinks(
+      { related: "[[Other Note]]" },
+      slugMap,
+      filePath,
+      vaultDir,
+      mediaDir
+    );
+
+    assert.equal(result.related, "/other-note");
+  });
+
+  it("resolves wiki-links inside arrays", () => {
+    const imgPath = join(vaultDir, "photo.jpg");
+    writeFileSync(imgPath, "fake-jpg");
+    const filePath = join(vaultDir, "note.md");
+
+    const result = resolveFrontmatterWikiLinks(
+      { gallery: ["[[photo.jpg]]", "[[Missing Page]]"] },
+      new Map(),
+      filePath,
+      vaultDir,
+      mediaDir
+    );
+
+    assert.equal(result.gallery[0], "/media/photo.jpg");
+    assert.equal(result.gallery[1], "/missing-page");
+  });
+
+  it("resolves wiki-links inside nested objects", () => {
+    const imgPath = join(vaultDir, "hero.webp");
+    writeFileSync(imgPath, "fake-webp");
+    const filePath = join(vaultDir, "note.md");
+
+    const result = resolveFrontmatterWikiLinks(
+      { meta: { cover: "[[hero.webp]]" } },
+      new Map(),
+      filePath,
+      vaultDir,
+      mediaDir
+    );
+
+    assert.equal(result.meta.cover, "/media/hero.webp");
+  });
+
+  it("strips media/ prefix from vault media paths", () => {
+    mkdirSync(join(vaultDir, "media"));
+    const imgPath = join(vaultDir, "media", "photo.png");
+    writeFileSync(imgPath, "fake-image");
+    const filePath = join(vaultDir, "note.md");
+
+    const result = resolveFrontmatterWikiLinks(
+      { image: "[[media/photo.png]]" },
+      new Map(),
+      filePath,
+      vaultDir,
+      mediaDir
+    );
+
+    assert.equal(result.image, "/media/photo.png");
+    assert.ok(existsSync(join(mediaDir, "photo.png")));
+  });
+
+  it("leaves non-string values unchanged", () => {
+    const filePath = join(vaultDir, "note.md");
+
+    const result = resolveFrontmatterWikiLinks(
+      { count: 42, active: true, date: new Date("2025-01-01") },
+      new Map(),
+      filePath,
+      vaultDir,
+      mediaDir
+    );
+
+    assert.equal(result.count, 42);
+    assert.equal(result.active, true);
+    assert.ok(result.date instanceof Date);
   });
 });
 
@@ -225,6 +341,74 @@ describe("syncFile", () => {
 
     const output = readFileSync(join(contentDir, "note.md"), "utf-8");
     assert.ok(output.includes("[Other](/other-page)"));
+  });
+
+  it("resolves media wiki-links in frontmatter", () => {
+    const imgPath = join(vaultDir, "banner.png");
+    writeFileSync(imgPath, "fake-image");
+    const filePath = join(vaultDir, "note.md");
+    writeFileSync(
+      filePath,
+      "---\ntitle: Note\npublic: true\ncover: \"[[banner.png]]\"\n---\nContent"
+    );
+
+    syncFile(filePath, vaultDir, new Map(), { contentDir, mediaDir });
+
+    const output = readFileSync(join(contentDir, "note.md"), "utf-8");
+    assert.ok(output.includes("cover: /media/banner.png"));
+    assert.ok(existsSync(join(mediaDir, "banner.png")));
+  });
+
+  it("resolves non-media wiki-links in frontmatter", () => {
+    const filePath = join(vaultDir, "note.md");
+    writeFileSync(
+      filePath,
+      "---\ntitle: Note\npublic: true\nrelated: \"[[Some Page]]\"\n---\nContent"
+    );
+
+    const slugMap = new Map([["some page", "some-page"]]);
+    syncFile(filePath, vaultDir, slugMap, { contentDir, mediaDir });
+
+    const output = readFileSync(join(contentDir, "note.md"), "utf-8");
+    assert.ok(output.includes("related: /some-page"));
+  });
+
+  it("adds computed fields from config", () => {
+    const filePath = join(vaultDir, "note.md");
+    writeFileSync(filePath, "---\ntitle: Note\npublic: true\n---\nContent");
+
+    syncFile(filePath, vaultDir, new Map(), {
+      contentDir,
+      mediaDir,
+      computedFields: { updated: "file.mtime" },
+    });
+
+    const output = readFileSync(join(contentDir, "note.md"), "utf-8");
+    assert.ok(output.includes("updated:"));
+  });
+
+  it("supports literal values in computed fields", () => {
+    const filePath = join(vaultDir, "note.md");
+    writeFileSync(filePath, "---\ntitle: Note\npublic: true\n---\nContent");
+
+    syncFile(filePath, vaultDir, new Map(), {
+      contentDir,
+      mediaDir,
+      computedFields: { layout: "post" },
+    });
+
+    const output = readFileSync(join(contentDir, "note.md"), "utf-8");
+    assert.ok(output.includes("layout: post"));
+  });
+
+  it("does not add updated field without computedFields config", () => {
+    const filePath = join(vaultDir, "note.md");
+    writeFileSync(filePath, "---\ntitle: Note\npublic: true\n---\nContent");
+
+    syncFile(filePath, vaultDir, new Map(), { contentDir, mediaDir });
+
+    const output = readFileSync(join(contentDir, "note.md"), "utf-8");
+    assert.ok(!output.includes("updated:"));
   });
 });
 

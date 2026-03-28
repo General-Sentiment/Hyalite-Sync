@@ -90,6 +90,81 @@ export function normalizeWikiLinks(content, slugMap) {
   );
 }
 
+const MEDIA_EXTENSIONS = new Set([
+  ".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".avif",
+  ".mp4", ".webm", ".ogv", ".mov",
+  ".mp3", ".ogg", ".wav", ".flac",
+  ".pdf",
+]);
+
+function isMediaFile(name) {
+  const ext = name.lastIndexOf(".") !== -1 ? name.slice(name.lastIndexOf(".")).toLowerCase() : "";
+  return MEDIA_EXTENSIONS.has(ext);
+}
+
+/**
+ * Resolve a wiki-link target to a media file in the vault.
+ * Returns the resolved source path, or null if not found.
+ */
+function findMediaInVault(target, filePath, vaultPath) {
+  // Try relative to the file first
+  let srcPath = resolve(dirname(filePath), target);
+  if (existsSync(srcPath) && statSync(srcPath).isFile()) return srcPath;
+
+  // Try vault root
+  srcPath = join(vaultPath, target);
+  if (existsSync(srcPath) && statSync(srcPath).isFile()) return srcPath;
+
+  return null;
+}
+
+/**
+ * Resolve wiki-links in frontmatter values.
+ * Media wiki-links are copied and rewritten to /media/ paths.
+ * Non-media wiki-links are resolved via the slug map.
+ */
+export function resolveFrontmatterWikiLinks(data, slugMap, filePath, vaultPath, mediaDir) {
+  const wikiLinkRegex = /\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g;
+
+  function resolveValue(value) {
+    if (typeof value === "string") {
+      return value.replace(wikiLinkRegex, (_, target, display) => {
+        if (isMediaFile(target)) {
+          const srcPath = findMediaInVault(target, filePath, vaultPath);
+          if (srcPath) {
+            const filename = basename(target);
+            const relativePath = target.startsWith("media/") ? target.slice(6) : filename;
+            const destPath = join(mediaDir, relativePath);
+            mkdirSync(dirname(destPath), { recursive: true });
+            copyFileSync(srcPath, destPath);
+            return `/media/${relativePath}`;
+          }
+        }
+        // Non-media: resolve as page link
+        const slug = slugMap.get(target.toLowerCase()) || slugify(target);
+        return `/${slug}`;
+      });
+    }
+    if (Array.isArray(value)) {
+      return value.map(resolveValue);
+    }
+    if (value && typeof value === "object" && !(value instanceof Date)) {
+      const result = {};
+      for (const [k, v] of Object.entries(value)) {
+        result[k] = resolveValue(v);
+      }
+      return result;
+    }
+    return value;
+  }
+
+  const resolved = {};
+  for (const [key, value] of Object.entries(data)) {
+    resolved[key] = resolveValue(value);
+  }
+  return resolved;
+}
+
 /**
  * Copy referenced images from vault to media directory, rewriting paths.
  */
@@ -114,6 +189,21 @@ export function syncMedia(content, filePath, vaultPath, mediaDir) {
   }
 
   return result;
+}
+
+const COMPUTED_SOURCES = {
+  "file.mtime": (stat) => stat.mtime.toISOString(),
+  "file.birthtime": (stat) => stat.birthtime.toISOString(),
+  "file.size": (stat) => stat.size,
+  slug: (_stat, ctx) => ctx.slug,
+  filepath: (_stat, ctx) => ctx.filePath,
+};
+
+function resolveComputedField(source, fileStat, ctx) {
+  const resolver = COMPUTED_SOURCES[source];
+  if (resolver) return resolver(fileStat, ctx);
+  // Treat as a literal value
+  return source;
 }
 
 /**
@@ -147,12 +237,19 @@ export function syncFile(filePath, vaultPath, slugMap, config) {
     delete cleanData[field];
   }
 
-  // Add last modified date
-  cleanData.updated = statSync(filePath).mtime.toISOString();
+  // Add computed fields from config
+  const { computedFields = {} } = config;
+  const fileStat = Object.keys(computedFields).length > 0 ? statSync(filePath) : null;
+  for (const [field, source] of Object.entries(computedFields)) {
+    cleanData[field] = resolveComputedField(source, fileStat, { slug, filePath });
+  }
+
+  // Resolve wiki-links in frontmatter values
+  const resolvedData = resolveFrontmatterWikiLinks(cleanData, slugMap, filePath, vaultPath, mediaDir);
 
   let normalizedContent = normalizeWikiLinks(content, slugMap);
   normalizedContent = syncMedia(normalizedContent, filePath, vaultPath, mediaDir);
-  const output = matter.stringify(normalizedContent, cleanData);
+  const output = matter.stringify(normalizedContent, resolvedData);
 
   const outPath = join(contentDir, `${slug}${ext}`);
   writeFileSync(outPath, output);
@@ -256,5 +353,6 @@ export function loadConfig(configPath, overrides = {}) {
     mediaDir: resolve(cwd, merged.mediaDir || "./public/media"),
     filter: merged.filter || {},
     stripFields: merged.stripFields || [],
+    computedFields: merged.computedFields || {},
   };
 }

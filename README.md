@@ -43,7 +43,11 @@ Create an `obsidian-sync.json` in your project root:
   "filter": {
     "project": "My Project"
   },
-  "stripFields": ["draft"]
+  "stripFields": ["draft"],
+  "computedFields": {
+    "updated": "file.mtime",
+    "layout": "post"
+  }
 }
 ```
 
@@ -53,13 +57,15 @@ The vault path can also be set via the `OBSIDIAN_VAULT` environment variable or 
 
 1. **Finds candidates** -- Uses `grep` to quickly find `.md`/`.mdx` files in your vault matching the filter criteria (defaults to `public: true` in frontmatter).
 
-2. **Resolves wiki-links** -- Builds a slug map from all candidate files and converts `[[wiki-links]]` and `[[target|display text]]` to standard markdown links with correct slugs.
+2. **Resolves wiki-links** -- Builds a slug map from all candidate files and converts `[[wiki-links]]` and `[[target|display text]]` to standard markdown links with correct slugs. Wiki-links in frontmatter values are also resolved -- media links (e.g. `cover: "[[photo.png]]"`) are copied and rewritten to `/media/...` paths, and page links are resolved to their slug.
 
 3. **Syncs media** -- Copies locally-referenced images to the media output directory and rewrites paths to `/media/...`.
 
 4. **Generates slugs** -- Each file's slug is determined by (in order of priority): a `slug` field in frontmatter, the `title` field in frontmatter, or the filename (without extension). The value is then lowercased, non-word characters are stripped, spaces become hyphens, and consecutive hyphens are collapsed.
 
-5. **Writes output** -- Saves processed files to the content directory using the slug as the filename.
+5. **Computed fields** -- Adds frontmatter fields defined in `computedFields` config. Values can be a known source (`file.mtime`, `file.birthtime`, `file.size`, `slug`, `filepath`) or a literal string.
+
+6. **Writes output** -- Saves processed files to the content directory using the slug as the filename.
 
 ## Programmatic API
 
